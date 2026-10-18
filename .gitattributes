@@ -1,0 +1,12 @@
+# Files that run inside Linux containers must keep LF line endings,
+# even when the repo is cloned on Windows (a CRLF shell script fails in bash).
+* text=auto
+*.sh text eol=lf
+*.sql text eol=lf
+*.conf text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.pptx binary

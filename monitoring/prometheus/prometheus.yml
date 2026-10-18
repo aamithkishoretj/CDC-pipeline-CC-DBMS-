@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # CDC consumer: events applied, commit -> Redis latency, Kafka consumer lag,
+  # Redis keyspace hits/misses, view rebuilds.
+  - job_name: cdc-consumer
+    static_configs:
+      - targets: ["consumer:8000"]

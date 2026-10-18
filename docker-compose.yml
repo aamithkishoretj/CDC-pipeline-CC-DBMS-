@@ -1,0 +1,258 @@
+# =============================================================================
+#  CDC Pipeline: PostgreSQL -> Debezium -> Kafka -> Consumer -> Redis -> Read API
+#
+#  WRITE PATH : browser -> write-api -> PostgreSQL            (only writer of PG)
+#  CDC PATH   : PostgreSQL WAL -> Debezium -> Kafka -> consumer -> Redis
+#  READ PATH  : browser -> read-api -> Redis                  (never touches PG)
+#
+#  One command starts everything, in the right order, and registers the
+#  Debezium connector automatically:
+#      docker compose up -d --build
+#  Then open  http://localhost:8080
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------- write side
+  postgres:
+    build: ./postgres-init                  # postgres:15 + schema, seed and roles baked in
+    image: cdc-postgres:latest
+    container_name: cdc-postgres
+    # wal_level=logical is what lets Debezium decode the WAL into row changes.
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=4
+      - -c
+      - max_wal_senders=4
+    environment:
+      POSTGRES_USER: cdcuser
+      POSTGRES_PASSWORD: cdcpass
+      POSTGRES_DB: shopdb
+    ports:
+      - "5433:5432"            # 5433 on the host so it never clashes with a local Postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cdcuser -d shopdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # --------------------------------------------------------------- event log
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: cdc-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    restart: unless-stopped
+
+  # Three-broker Kafka cluster. Every topic is replicated to all 3 brokers
+  # (replication factor 3) and a write must reach at least 2 of them
+  # (min.insync.replicas=2, producer acks=all). Any ONE broker can fail
+  # without losing an event or stopping the pipeline.
+  kafka-1:
+    <<: &kafka
+      image: confluentinc/cp-kafka:7.6.0
+      depends_on:
+        - zookeeper
+      healthcheck:
+        test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:29092 --list >/dev/null 2>&1"]
+        interval: 10s
+        timeout: 10s
+        retries: 20
+        start_period: 15s
+      restart: unless-stopped
+    container_name: cdc-kafka-1
+    ports: ["9092:9092"]
+    environment:
+      <<: &kafka-env
+        KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+        KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+        KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+        KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+        KAFKA_MIN_INSYNC_REPLICAS: 2
+        KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+        KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+        KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+        KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+        KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+        KAFKA_NUM_PARTITIONS: 3            # lets up to 3 consumer replicas share the load
+        KAFKA_HEAP_OPTS: "-Xms384m -Xmx384m"
+      KAFKA_BROKER_ID: 1
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:29092,PLAINTEXT_HOST://localhost:9092
+
+  kafka-2:
+    <<: *kafka
+    container_name: cdc-kafka-2
+    ports: ["9093:9093"]
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 2
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:29092,PLAINTEXT_HOST://localhost:9093
+
+  kafka-3:
+    <<: *kafka
+    container_name: cdc-kafka-3
+    ports: ["9094:9094"]
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 3
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:29092,PLAINTEXT_HOST://localhost:9094
+
+  # ------------------------------------------------------------ CDC engine
+  connect:
+    image: debezium/connect:2.6
+    container_name: cdc-connect
+    depends_on:
+      kafka-1: { condition: service_healthy }
+      kafka-2: { condition: service_healthy }
+      kafka-3: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka-1:29092,kafka-2:29092,kafka-3:29092
+      GROUP_ID: cdc-connect-cluster
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      # The Debezium image only passes CONNECT_* variables through to the worker config.
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 3
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 3
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 3
+      CONNECT_PRODUCER_ACKS: all             # Debezium waits for 2+ brokers before moving on
+      HEAP_OPTS: "-Xms512m -Xmx768m"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  # One-shot job: registers (or updates) the Debezium connector, then exits.
+  connect-init:
+    build: ./debezium                       # debezium/connect + connector config baked in
+    image: cdc-connect-init:latest
+    container_name: cdc-connect-init
+    depends_on:
+      connect:
+        condition: service_healthy
+    environment:
+      CONNECT_URL: http://connect:8083
+    restart: "no"
+
+  # --------------------------------------------------------------- read side
+  redis:
+    image: redis:7-alpine
+    container_name: cdc-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  consumer:
+    build: ./consumer
+    image: cdc-consumer:latest
+    container_name: cdc-consumer
+    depends_on:
+      kafka-1: { condition: service_healthy }
+      kafka-2: { condition: service_healthy }
+      kafka-3: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      KAFKA_BOOTSTRAP: kafka-1:29092,kafka-2:29092,kafka-3:29092
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      TOPIC_PREFIX: shopdb
+    ports:
+      - "8000:8000"            # Prometheus metrics
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------- services
+  write-api:
+    build: ./services/write-api
+    image: cdc-write-api:latest
+    container_name: cdc-write-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_USER: app_writer
+      PG_PASSWORD: writerpass
+      PG_DB: shopdb
+      REDIS_HOST: redis       # used ONLY by the "naive dual-write" demo endpoint
+      REDIS_PORT: "6379"
+    ports:
+      - "5001:5001"
+    restart: unless-stopped
+
+  read-api:
+    build: ./services/read-api
+    image: cdc-read-api:latest
+    container_name: cdc-read-api
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    ports:
+      - "5002:5002"
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend                       # nginx + website + routing config baked in
+    image: cdc-frontend:latest
+    container_name: cdc-frontend
+    depends_on:
+      - write-api
+      - read-api
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+  # --------------------------------------------------------------- monitoring
+  prometheus:
+    build: ./monitoring/prometheus          # prom/prometheus + scrape config baked in
+    image: cdc-prometheus:latest
+    container_name: cdc-prometheus
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=2d"]
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    build: ./monitoring/grafana             # grafana/grafana + datasource + CDC dashboard baked in
+    image: cdc-grafana:latest
+    container_name: cdc-grafana
+    depends_on:
+      - prometheus
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"        # open the dashboard without logging in (read-only)
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: dark
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/cdc-pipeline.json
+      GF_SECURITY_ADMIN_PASSWORD: admin        # admin login for editing: admin / admin
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

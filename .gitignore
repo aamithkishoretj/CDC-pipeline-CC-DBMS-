@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local k3s cluster credentials written by k8s/k3s-local.ps1
+k8s/kubeconfig.yaml
+
+# Benchmark output and temporary files
+*.csv
+*.tar
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

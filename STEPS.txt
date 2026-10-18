@@ -1,0 +1,48 @@
+HOW TO RUN (Windows)
+====================
+
+1. Open Docker Desktop and wait until it says "Engine running".
+
+2. Open Command Prompt in the project folder (the one with docker-compose.yml), e.g.:
+       cd %USERPROFILE%\Documents\cdc-pipeline-project
+
+3. Start everything (first time takes a few minutes to download and build images):
+       docker compose up -d --build
+
+4. Check the containers:
+       docker compose ps
+   You should see 13 running containers:
+       cdc-postgres, cdc-zookeeper, cdc-kafka-1, cdc-kafka-2, cdc-kafka-3,
+       cdc-connect, cdc-redis, cdc-consumer, cdc-write-api, cdc-read-api,
+       cdc-frontend, cdc-prometheus, cdc-grafana
+   plus cdc-connect-init, which registers the Debezium connector and then
+   EXITS. "Exited (0)" for that one is correct.
+
+5. Open in a normal browser (Chrome / Edge, not the Claude app's side panel):
+       http://localhost:8080      the website (Shop, Orders, How it works)
+       http://localhost:3000      the Grafana monitoring dashboard
+
+Before the review: reset to fresh demo data
+-------------------------------------------
+       docker compose down -v
+       docker compose up -d --build
+
+Optional checks
+---------------
+   python tests/test_e2e.py                                         -> 15 automated tests
+   python tests/test_failover.py                                    -> kills a Kafka broker, 0 orders lost
+   curl http://localhost:8083/connectors/shopdb-connector/status   -> Debezium connector RUNNING
+   docker logs -f cdc-consumer                                      -> live CDC events
+   docker exec -it cdc-redis redis-cli GET view:order:1             -> denormalized order in Redis
+   docker exec -it cdc-postgres psql -U cdcuser -d shopdb           -> SQL shell
+
+Kubernetes (optional, a real cluster inside Docker)
+---------------------------------------------------
+   powershell -ExecutionPolicy Bypass -File k8s\k3s-local.ps1          -> website on http://localhost:30080
+   powershell -ExecutionPolicy Bypass -File k8s\k3s-local.ps1 -Delete  -> remove it
+   (it stops the Compose stack first; start it again with: docker compose up -d)
+
+Slides for Review 2:  docs\review2-slides.pptx
+
+Stop:            docker compose down
+Stop + reset DB: docker compose down -v

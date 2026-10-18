@@ -1,0 +1,207 @@
+# =============================================================================
+#  Stateful infrastructure: PostgreSQL, ZooKeeper, Kafka, Debezium Connect, Redis
+#  `enableServiceLinks: false` stops Kubernetes injecting env vars such as
+#  KAFKA_PORT, which the Confluent and Debezium images would misread as config.
+# =============================================================================
+
+# ------------------------------------------------------------------ PostgreSQL
+apiVersion: v1
+kind: Service
+metadata: { name: postgres, namespace: cdc, labels: { app: postgres } }
+spec:
+  clusterIP: None            # headless service for the StatefulSet
+  selector: { app: postgres }
+  ports: [{ port: 5432, name: postgres }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: postgres, namespace: cdc }
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector: { matchLabels: { app: postgres } }
+  template:
+    metadata: { labels: { app: postgres, tier: write } }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: postgres
+          image: postgres:15
+          args: ["-c", "wal_level=logical", "-c", "max_replication_slots=4", "-c", "max_wal_senders=4"]
+          envFrom: [{ secretRef: { name: postgres-credentials } }]
+          env: [{ name: PGDATA, value: /var/lib/postgresql/data/pgdata }]
+          ports: [{ containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"] }
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: init, mountPath: /docker-entrypoint-initdb.d, readOnly: true }
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }
+      volumes:
+        - name: init
+          configMap: { name: postgres-init }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 1Gi } }
+---
+# ------------------------------------------------------------------- ZooKeeper
+apiVersion: v1
+kind: Service
+metadata: { name: zookeeper, namespace: cdc }
+spec:
+  selector: { app: zookeeper }
+  ports: [{ port: 2181 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: zookeeper, namespace: cdc }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: zookeeper } }
+  template:
+    metadata: { labels: { app: zookeeper } }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: zookeeper
+          image: confluentinc/cp-zookeeper:7.6.0
+          env:
+            - { name: ZOOKEEPER_CLIENT_PORT, value: "2181" }
+            - { name: ZOOKEEPER_TICK_TIME, value: "2000" }
+          ports: [{ containerPort: 2181 }]
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+---
+# ----------------------------------------------------------------------- Kafka
+apiVersion: v1
+kind: Service
+metadata: { name: kafka, namespace: cdc }
+spec:
+  selector: { app: kafka }
+  ports: [{ port: 29092, name: internal }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: kafka, namespace: cdc }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: kafka } }
+  template:
+    metadata: { labels: { app: kafka } }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: kafka
+          image: confluentinc/cp-kafka:7.6.0
+          env:
+            - { name: KAFKA_BROKER_ID, value: "1" }
+            - { name: KAFKA_ZOOKEEPER_CONNECT, value: "zookeeper:2181" }
+            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://0.0.0.0:29092" }
+            - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka:29092" }
+            - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
+            - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "true" }
+            - { name: KAFKA_NUM_PARTITIONS, value: "3" }
+          ports: [{ containerPort: 29092 }]
+          readinessProbe:
+            tcpSocket: { port: 29092 }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 1Gi }
+---
+# ------------------------------------------------------------ Debezium Connect
+apiVersion: v1
+kind: Service
+metadata: { name: connect, namespace: cdc }
+spec:
+  selector: { app: connect }
+  ports: [{ port: 8083 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: connect, namespace: cdc }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: connect } }
+  template:
+    metadata: { labels: { app: connect } }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: connect
+          image: debezium/connect:2.6
+          env:
+            - { name: BOOTSTRAP_SERVERS, value: "kafka:29092" }
+            - { name: GROUP_ID, value: cdc-connect-cluster }
+            - { name: CONFIG_STORAGE_TOPIC, value: connect_configs }
+            - { name: OFFSET_STORAGE_TOPIC, value: connect_offsets }
+            - { name: STATUS_STORAGE_TOPIC, value: connect_statuses }
+            - { name: CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
+            - { name: OFFSET_STORAGE_REPLICATION_FACTOR, value: "1" }
+            - { name: STATUS_STORAGE_REPLICATION_FACTOR, value: "1" }
+          ports: [{ containerPort: 8083 }]
+          readinessProbe:
+            httpGet: { path: /connectors, port: 8083 }
+            initialDelaySeconds: 20
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 1536Mi }
+---
+# One-shot Job that registers the connector once Connect is reachable.
+apiVersion: batch/v1
+kind: Job
+metadata: { name: register-connector, namespace: cdc }
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      enableServiceLinks: false
+      restartPolicy: OnFailure
+      containers:
+        - name: register
+          image: debezium/connect:2.6
+          command: ["/bin/bash", "/debezium/register-connector.sh"]
+          env: [{ name: CONNECT_URL, value: "http://connect:8083" }]
+          volumeMounts: [{ name: cfg, mountPath: /debezium }]
+      volumes:
+        - name: cfg
+          configMap: { name: debezium-config }
+---
+# ----------------------------------------------------------------------- Redis
+apiVersion: v1
+kind: Service
+metadata: { name: redis, namespace: cdc }
+spec:
+  selector: { app: redis }
+  ports: [{ port: 6379 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: redis, namespace: cdc }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: redis } }
+  template:
+    metadata: { labels: { app: redis, tier: read } }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["redis-server", "--appendonly", "yes"]
+          ports: [{ containerPort: 6379 }]
+          readinessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }

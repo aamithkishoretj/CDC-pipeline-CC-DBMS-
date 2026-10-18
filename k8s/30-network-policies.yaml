@@ -1,0 +1,31 @@
+# =============================================================================
+#  Network security: enforce the read/write separation at the network level.
+#    * PostgreSQL accepts connections only from write-api and Debezium Connect.
+#    * Redis accepts connections only from the consumer, read-api and write-api
+#      (write-api only for the "naive dual-write" demo namespace).
+#  Requires a CNI that enforces NetworkPolicy (e.g. `minikube start --cni=calico`).
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: postgres-ingress, namespace: cdc }
+spec:
+  podSelector: { matchLabels: { app: postgres } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: write-api } }
+        - podSelector: { matchLabels: { app: connect } }
+      ports: [{ port: 5432 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: redis-ingress, namespace: cdc }
+spec:
+  podSelector: { matchLabels: { app: redis } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: consumer } }
+        - podSelector: { matchLabels: { app: read-api } }
+        - podSelector: { matchLabels: { app: write-api } }
+      ports: [{ port: 6379 }]

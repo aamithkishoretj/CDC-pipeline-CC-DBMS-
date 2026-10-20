@@ -1,0 +1,12 @@
+#cloud-config
+# Installs Docker Engine + the Compose plugin on the Ubuntu VM at first boot.
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker azureuser
+  - systemctl enable --now docker
+  - mkdir -p /opt/cdc && chown azureuser:azureuser /opt/cdc
+  - touch /var/lib/cloud/instance/docker-ready

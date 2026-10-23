@@ -14,7 +14,7 @@ docker build -t cdc-read-api:latest  ./services/read-api
 
 Write-Host "Creating namespace, secret and config maps ..."
 kubectl apply -f k8s/00-namespace-secrets.yaml
-kubectl -n cdc create configmap postgres-init   --from-file=postgres-init/ --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n cdc create configmap postgres-init   --from-file=database/01_schema.sql --from-file=database/02_seed.sql --from-file=database/03_roles.sql --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n cdc create configmap debezium-config --from-file=debezium/      --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n cdc create configmap frontend --from-file=frontend/index.html --from-file=nginx.conf=k8s/nginx-k8s.conf --dry-run=client -o yaml | kubectl apply -f -
 

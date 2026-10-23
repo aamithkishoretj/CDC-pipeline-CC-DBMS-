@@ -15,7 +15,7 @@ services:
 
   # ---------------------------------------------------------------- write side
   postgres:
-    build: ./postgres-init                  # postgres:15 + schema, seed and roles baked in
+    build: ./database                       # postgres:15 + schema, seed and roles baked in
     image: cdc-postgres:latest
     container_name: cdc-postgres
     # wal_level=logical is what lets Debezium decode the WAL into row changes.

@@ -1,0 +1,257 @@
+-- Output of database/queries.sql on a freshly seeded shopdb (PostgreSQL 15).
+-- Counts and values are reproducible; timestamps depend on the day the database was created.
+
+== A1. Tables in the database
+      table_name      
+----------------------
+ categories
+ customers
+ order_items
+ order_status_history
+ orders
+ payments
+ products
+(7 rows)
+
+== A2. Number of rows in every table
+      table_name      | rows 
+----------------------+------
+ categories           |    6
+ products             |   24
+ customers            |  200
+ orders               | 1200
+ order_items          | 2400
+ payments             | 1200
+ order_status_history | 3360
+(7 rows)
+
+== A3. Primary keys, foreign keys, unique and check constraints
+      table_name      | constraint_type |           constraint_name           
+----------------------+-----------------+-------------------------------------
+ categories           | PRIMARY KEY     | categories_pkey
+ categories           | UNIQUE          | categories_name_key
+ customers            | CHECK           | customers_email_check
+ customers            | PRIMARY KEY     | customers_pkey
+ customers            | UNIQUE          | customers_email_key
+ order_items          | CHECK           | order_items_quantity_check
+ order_items          | CHECK           | order_items_unit_price_check
+ order_items          | FOREIGN KEY     | order_items_order_id_fkey
+ order_items          | FOREIGN KEY     | order_items_product_id_fkey
+ order_items          | PRIMARY KEY     | order_items_pkey
+ order_items          | UNIQUE          | order_items_order_id_product_id_key
+ order_status_history | FOREIGN KEY     | order_status_history_order_id_fkey
+ order_status_history | PRIMARY KEY     | order_status_history_pkey
+ orders               | CHECK           | orders_status_check
+ orders               | CHECK           | orders_total_amount_check
+ orders               | FOREIGN KEY     | orders_customer_id_fkey
+ orders               | PRIMARY KEY     | orders_pkey
+ payments             | CHECK           | payments_amount_check
+ payments             | CHECK           | payments_method_check
+ payments             | CHECK           | payments_status_check
+ payments             | FOREIGN KEY     | payments_order_id_fkey
+ payments             | PRIMARY KEY     | payments_pkey
+ products             | CHECK           | products_price_check
+ products             | CHECK           | products_stock_check
+ products             | FOREIGN KEY     | products_category_id_fkey
+ products             | PRIMARY KEY     | products_pkey
+(26 rows)
+
+== A4. Foreign keys and the tables they reference (with delete rule)
+      table_name      | column_name | references_table | references_column | delete_rule 
+----------------------+-------------+------------------+-------------------+-------------
+ order_items          | order_id    | orders           | order_id          | CASCADE
+ order_items          | product_id  | products         | product_id        | NO ACTION
+ order_status_history | order_id    | orders           | order_id          | CASCADE
+ orders               | customer_id | customers        | customer_id       | NO ACTION
+ payments             | order_id    | orders           | order_id          | CASCADE
+ products             | category_id | categories       | category_id       | NO ACTION
+(6 rows)
+
+== A5. Triggers
+       trigger_name        |  on_table   | timing |         events         
+---------------------------+-------------+--------+------------------------
+ trg_order_items_total     | order_items | AFTER  | INSERT, DELETE, UPDATE
+ trg_orders_status_history | orders      | AFTER  | INSERT, UPDATE
+ trg_products_touch        | products    | BEFORE | UPDATE
+(3 rows)
+
+== B1. INNER JOIN over 5 tables: the lines of order 1
+ order_id |  customer   |     product      |  category   | quantity | unit_price | line_total 
+----------+-------------+------------------+-------------+----------+------------+------------
+        1 | Lakshmi Rao | Wireless Earbuds | Electronics |        1 |    2499.00 |    2499.00
+        1 | Lakshmi Rao | Water Bottle     | Home        |        2 |     599.00 |    1198.00
+(2 rows)
+
+== B2. JOIN with payments and the latest status change of order 1
+ order_id |  status   | total_amount | method | payment_status | old_status | new_status |         changed_at         
+----------+-----------+--------------+--------+----------------+------------+------------+----------------------------
+        1 | delivered |      3697.00 | upi    | completed      |            | pending    | 2026-09-20 11:32:39.582251
+        1 | delivered |      3697.00 | upi    | completed      | pending    | processing | 2026-09-20 17:32:39.582251
+        1 | delivered |      3697.00 | upi    | completed      | processing | shipped    | 2026-09-21 11:32:39.582251
+        1 | delivered |      3697.00 | upi    | completed      | shipped    | delivered  | 2026-09-23 11:32:39.582251
+(4 rows)
+
+== B3. LEFT JOIN: every category with its number of products
+  category   | products | cheapest | most_expensive 
+-------------+----------+----------+----------------
+ Books       |        4 |   799.00 |        1499.00
+ Computers   |        6 |   799.00 |       15999.00
+ Electronics |        4 |  1599.00 |        4999.00
+ Fashion     |        3 |  1799.00 |        3299.00
+ Home        |        4 |   599.00 |        5499.00
+ Sports      |        3 |   899.00 |        4599.00
+(6 rows)
+
+== C1. Revenue, orders and units sold per category
+  category   | orders | units |  revenue   
+-------------+--------+-------+------------
+ Computers   |    515 |  1218 | 5831182.00
+ Electronics |    335 |   713 | 2048487.00
+ Home        |    388 |   841 | 1653959.00
+ Fashion     |    289 |   618 | 1445082.00
+ Sports      |    258 |   524 | 1339376.00
+ Books       |    391 |   876 |  945793.00
+(6 rows)
+
+== C2. Orders and average order value per status
+   status   | orders | avg_order_value 
+------------+--------+-----------------
+ delivered  |    480 |        11289.83
+ shipped    |    240 |        10956.61
+ pending    |    240 |        10644.66
+ processing |    240 |        11085.22
+(4 rows)
+
+== C3. Payment methods that collected more than 33 lakh (HAVING)
+   method   | payments | total_amount 
+------------+----------+--------------
+ cod        |      300 |   3694552.00
+ netbanking |      300 |   3404190.00
+(2 rows)
+
+== C4. Top 5 cities by revenue
+   city    | orders |  revenue   
+-----------+--------+------------
+ Ahmedabad |    141 | 1575698.00
+ Bengaluru |    129 | 1424099.00
+ Hyderabad |    111 | 1416721.00
+ Mumbai    |    119 | 1365848.00
+ Chennai   |    117 | 1354287.00
+(5 rows)
+
+== D1. Customers whose total spending is above the average (subquery in HAVING)
+ customer_id |     name      |   city    | total_spent 
+-------------+---------------+-----------+-------------
+         199 | Pooja Kumar   | Ahmedabad |   240492.00
+          22 | Nikhil Reddy  | Chennai   |   188252.00
+         161 | Divya Nambiar | Mumbai    |   187063.00
+          47 | Anjali Pillai | Kochi     |   185533.00
+         159 | Anjali Rao    | Ahmedabad |   164000.00
+(5 rows)
+
+== D2. Orders worth more than the average order (scalar subquery)
+ orders_above_average | average_order_value 
+----------------------+---------------------
+                  412 |            11053.23
+(1 row)
+
+== D3. Customers who bought something from Electronics (IN subquery)
+ electronics_customers 
+-----------------------
+                   168
+(1 row)
+
+== D4. Customers with no delivered order (correlated NOT EXISTS)
+ customers_without_delivery 
+----------------------------
+                         19
+(1 row)
+
+== D5. Each product compared with the average price of its category (correlated subquery)
+                 name                  |  category   |  price   | category_avg 
+---------------------------------------+-------------+----------+--------------
+ Designing Data-Intensive Applications | Books       |  1499.00 |      1086.75
+ Database System Concepts              | Books       |  1150.00 |      1086.75
+ 27" Monitor                           | Computers   | 15999.00 |      4849.00
+ Portable SSD 1TB                      | Computers   |  6499.00 |      4849.00
+ Smartwatch                            | Electronics |  4999.00 |      2749.00
+ Running Shoes                         | Fashion     |  3299.00 |      2432.33
+ Air Fryer                             | Home        |  5499.00 |      2049.00
+ Cricket Bat                           | Sports      |  4599.00 |      2599.00
+(8 rows)
+
+== E1. Best-selling product in each category (window function RANK)
+  category   |         product          | units 
+-------------+--------------------------+-------
+ Fashion     | Denim Jacket             |   252
+ Books       | The Pragmatic Programmer |   234
+ Home        | Electric Kettle          |   229
+ Computers   | Portable SSD 1TB         |   227
+ Electronics | Wireless Earbuds         |   204
+ Sports      | Dumbbell Set             |   200
+(6 rows)
+
+== E2. Top customer in each of the first 5 cities (CTE + DENSE_RANK)
+    city    |     name     | total_spent 
+------------+--------------+-------------
+ Ahmedabad  | Pooja Kumar  |   240492.00
+ Bengaluru  | Suresh Joshi |   144874.00
+ Chennai    | Nikhil Reddy |   188252.00
+ Coimbatore | Harish Bhat  |   158414.00
+ Delhi      | Deepa Pillai |   161175.00
+(5 rows)
+
+== E3. Running total of one customer's spending (window SUM)
+ order_id |    day     | total_amount | running_total 
+----------+------------+--------------+---------------
+      269 | 2026-07-31 |      6295.00 |       6295.00
+      245 | 2026-08-04 |     10994.00 |      17289.00
+      841 | 2026-08-09 |      8196.00 |      25485.00
+      870 | 2026-08-24 |      1499.00 |      26984.00
+      129 | 2026-09-11 |      2997.00 |      29981.00
+        1 | 2026-09-20 |      3697.00 |      33678.00
+      408 | 2026-10-08 |      6998.00 |      40676.00
+     1004 | 2026-10-10 |     12093.00 |      52769.00
+      538 | 2026-10-10 |     21095.00 |      73864.00
+     1024 | 2026-10-16 |      7297.00 |      81161.00
+(10 rows)
+
+== F1. View: one row per order with customer and item count
+CREATE VIEW
+ order_id |         order_date         |  status   | total_amount |   customer    |    city    | items 
+----------+----------------------------+-----------+--------------+---------------+------------+-------
+        1 | 2026-09-20 11:32:39.582251 | delivered |      3697.00 | Lakshmi Rao   | Ahmedabad  |     2
+        2 | 2026-10-17 07:32:58.87861  | delivered |     34796.00 | Harish Chopra | Coimbatore |     3
+        3 | 2026-10-03 20:32:01.847937 | delivered |      6897.00 | Kavya Reddy   | Ahmedabad  |     1
+        4 | 2026-09-18 01:42:26.927524 | shipped   |      1498.00 | Kavya Bhat    | Ahmedabad  |     2
+        5 | 2026-08-16 05:56:05.977565 | shipped   |     19994.00 | Manoj Shetty  | Kolkata    |     3
+(5 rows)
+
+== G1. Transaction with triggers: place an order, inspect it, then ROLLBACK
+BEGIN
+ product_id |       name       |  price  | stock 
+------------+------------------+---------+-------
+          1 | Wireless Earbuds | 2499.00 |   320
+          2 | Smartwatch       | 4999.00 |   150
+(2 rows)
+
+INSERT 0 1
+INSERT 0 2
+UPDATE 2
+ order_id | status  | total_amount 
+----------+---------+--------------
+     1203 | pending |      7498.00
+(1 row)
+
+ old_status | new_status 
+------------+------------
+            | pending
+(1 row)
+
+ROLLBACK
+== G2. After ROLLBACK the order is gone and the row counts are unchanged
+ orders 
+--------
+   1200
+(1 row)
+
